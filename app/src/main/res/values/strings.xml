@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Voice</string>
+    <string name="summon_service_desc">Lets the DJI mic button open MiniClaw and start listening from anywhere. Reacts only to the DJI mic; your volume buttons keep working.</string>
+</resources>
