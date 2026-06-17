@@ -3,6 +3,9 @@ package ai.mytextpal.miniclaw
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
+import android.media.ToneGenerator
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.Settings
@@ -44,6 +47,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -54,6 +59,9 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 
 data class Exchange(val you: String, val wright: String)
+
+/** The three interaction states that drive the on-screen controls. */
+private enum class UiMode { IDLE, RECORDING, RESPONDING }
 
 /**
  * MiniClaw launcher (v1).
@@ -95,9 +103,29 @@ class MainActivity : ComponentActivity(), MiniClawListener {
         if (granted) startRecording() else status = "mic permission denied"
     }
 
+    private var toneGen: ToneGenerator? = null
+
+    private val notifPermLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* the wake service runs regardless; this just lets its notification show */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Show over the keyguard and power the screen on when summoned from a locked pocket.
+        setShowWhenLocked(true)
+        setTurnScreenOn(true)
+
+        // Start (and keep alive) the earbud-button wake service, and make sure its FGS
+        // notification can be shown on Android 13+.
+        ContextCompat.startForegroundService(this, Intent(this, WakeService::class.java))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
 
         recorder = VoiceRecorder(this)
         client = MiniClawClient(
@@ -133,11 +161,15 @@ class MainActivity : ComponentActivity(), MiniClawListener {
                     HistoryScreen(history = history, onBack = { showHistory = false })
                 } else {
                     HomeScreen(
-                        listening = recording,
-                        active = busy || speaking,
+                        mode = when {
+                            recording -> UiMode.RECORDING
+                            busy || speaking -> UiMode.RESPONDING
+                            else -> UiMode.IDLE
+                        },
                         status = status,
                         summonEnabled = summonEnabled,
-                        onMic = ::onTrigger,
+                        onPrimary = ::onPrimary,
+                        onAbort = ::onAbort,
                         onHistory = { showHistory = true },
                         onReturnHome = ::returnToLightOS,
                     )
@@ -155,17 +187,19 @@ class MainActivity : ComponentActivity(), MiniClawListener {
     override fun onResume() {
         super.onResume()
         Summon.activityResumed = true
-        Summon.activityTrigger = { onTrigger() }
+        Summon.activityPrimary = { onPrimary() }
+        Summon.activityAbort = { onAbort() }
         summonEnabled = isSummonServiceEnabled()
         if (pendingTrigger) {
             pendingTrigger = false
-            onTrigger()
+            onPrimary()
         }
     }
 
     override fun onPause() {
         Summon.activityResumed = false
-        Summon.activityTrigger = null
+        Summon.activityPrimary = null
+        Summon.activityAbort = null
         super.onPause()
     }
 
@@ -174,37 +208,67 @@ class MainActivity : ComponentActivity(), MiniClawListener {
         ttsPlayer.stop()
         tts?.stop()
         tts?.shutdown()
+        toneGen?.release()
         super.onDestroy()
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-            if (event.action == KeyEvent.ACTION_DOWN) onTrigger()
+            if (event.action == KeyEvent.ACTION_DOWN) onPrimary()
             return true
         }
         return super.dispatchKeyEvent(event)
     }
 
-    private fun onTrigger() {
-        if (recorder.isRecording) {
-            stopAndSend()
-            return
+    /**
+     * Single tap / "advance the loop":
+     *   idle → start recording; recording → confirm & send; responding → stop the reply early
+     *   and immediately start listening again.
+     */
+    private fun onPrimary() {
+        when {
+            recorder.isRecording -> stopAndSend()
+            busy || ttsPlayer.isSpeaking -> { abortReply(); beginRecording() }
+            else -> beginRecording()
         }
-        if (busy || ttsPlayer.isSpeaking) {
-            // Something is generating or speaking: stop it; do NOT start a new recording.
-            client.abort()
-            ttsPlayer.stop()
-            ttsBuffer.setLength(0)
-            busy = false
-            speaking = false
-            status = ""
-            return
+    }
+
+    /**
+     * Double tap / "back out":
+     *   recording → discard it; responding → stop the reply and stay idle; idle → nothing.
+     */
+    private fun onAbort() {
+        when {
+            recorder.isRecording -> {
+                recorder.cancel()
+                recording = false
+                status = ""
+            }
+            busy || ttsPlayer.isSpeaking -> abortReply()
         }
+    }
+
+    /** Stop an in-flight generation and any speech, returning to idle. */
+    private fun abortReply() {
+        client.abort()
+        ttsPlayer.stop()
+        ttsBuffer.setLength(0)
+        busy = false
+        speaking = false
+        status = ""
+    }
+
+    private fun beginRecording() {
         if (hasAudioPermission()) startRecording()
         else permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
     }
 
     private fun startRecording() {
+        if (!recorder.isUsbMicConnected()) {
+            status = "Connect the DJI mic"
+            playError()
+            return
+        }
         ttsPlayer.stop()
         ttsBuffer.setLength(0)
         speaking = false
@@ -213,7 +277,16 @@ class MainActivity : ComponentActivity(), MiniClawListener {
             status = "listening"
         } else {
             status = "mic error"
+            playError()
         }
+    }
+
+    /** Short error tone (routes through STREAM_MUSIC → the earbuds). */
+    private fun playError() {
+        try {
+            val tg = toneGen ?: ToneGenerator(AudioManager.STREAM_MUSIC, 90).also { toneGen = it }
+            tg.startTone(ToneGenerator.TONE_PROP_NACK)
+        } catch (_: Exception) {}
     }
 
     private fun stopAndSend() {
@@ -331,11 +404,11 @@ class MainActivity : ComponentActivity(), MiniClawListener {
 
 @Composable
 private fun HomeScreen(
-    listening: Boolean,
-    active: Boolean,
+    mode: UiMode,
     status: String,
     summonEnabled: Boolean,
-    onMic: () -> Unit,
+    onPrimary: () -> Unit,
+    onAbort: () -> Unit,
     onHistory: () -> Unit,
     onReturnHome: () -> Unit,
 ) {
@@ -343,21 +416,15 @@ private fun HomeScreen(
     val stopColor = Color(0xFFFF8A80)
     val muted = Color(0xFF9AA0A6)
 
-    val stopping = active && !listening
-    val circleBg = when {
-        listening -> Color(0xFF13351F)
-        stopping -> Color(0xFF3A1313)
-        else -> Color(0xFF1A1A1A)
+    val title = when (mode) {
+        UiMode.IDLE -> "Tap to talk"
+        UiMode.RECORDING -> "Listening…"
+        UiMode.RESPONDING -> "Responding…"
     }
-    val title = when {
-        listening -> "Listening…"
-        stopping -> "Tap to stop"
-        else -> "Tap to talk"
-    }
-    val titleColor = when {
-        listening -> accent
-        stopping -> stopColor
-        else -> Color.White
+    val titleColor = when (mode) {
+        UiMode.IDLE -> Color.White
+        UiMode.RECORDING -> accent
+        UiMode.RESPONDING -> stopColor
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
@@ -370,24 +437,30 @@ private fun HomeScreen(
         ) {
             Spacer(Modifier.weight(1f))
 
-            Box(
-                modifier = Modifier
-                    .size(150.dp)
-                    .clip(CircleShape)
-                    .background(circleBg)
-                    .clickable { onMic() },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(if (stopping) "⏹" else "🎤", fontSize = 60.sp)
+            when (mode) {
+                UiMode.IDLE -> CircleButton(
+                    glyph = "🎤",
+                    bg = Color(0xFF1A1A1A),
+                    onClick = onPrimary,
+                )
+                // Recording: cancel (✗) on the left, confirm & send (✓) on the right.
+                UiMode.RECORDING -> Row(
+                    horizontalArrangement = Arrangement.spacedBy(28.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircleButton(glyph = "✕", bg = Color(0xFF3A1313), size = 118.dp, glyphSize = 44.sp, onClick = onAbort)
+                    CircleButton(glyph = "✓", bg = Color(0xFF13351F), size = 118.dp, glyphSize = 44.sp, onClick = onPrimary)
+                }
+                // Responding: one big stop.
+                UiMode.RESPONDING -> CircleButton(
+                    glyph = "⏹",
+                    bg = Color(0xFF3A1313),
+                    onClick = onAbort,
+                )
             }
 
             Spacer(Modifier.height(20.dp))
-            Text(
-                text = title,
-                color = titleColor,
-                fontSize = 24.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Text(text = title, color = titleColor, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
             Text(status, color = muted, fontSize = 14.sp)
 
@@ -409,6 +482,26 @@ private fun HomeScreen(
                 TextButton(onClick = onReturnHome) { Text("LightOS", color = muted) }
             }
         }
+    }
+}
+
+@Composable
+private fun CircleButton(
+    glyph: String,
+    bg: Color,
+    size: Dp = 150.dp,
+    glyphSize: TextUnit = 60.sp,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(bg)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(glyph, fontSize = glyphSize)
     }
 }
 

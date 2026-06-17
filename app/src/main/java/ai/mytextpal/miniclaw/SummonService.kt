@@ -1,7 +1,6 @@
 package ai.mytextpal.miniclaw
 
 import android.accessibilityservice.AccessibilityService
-import android.content.Intent
 import android.util.Log
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
@@ -12,7 +11,8 @@ import android.view.accessibility.AccessibilityEvent
  * volume), while letting the phone's own volume rocker pass through untouched.
  *
  * Works while the screen is on (foreground, backgrounded, other apps, lockscreen). Screen-off
- * idle is not reachable without root — see project notes.
+ * idle is not reachable this way without root — the earbud media button ([[WakeService]]) covers
+ * the locked/pocketed case instead.
  */
 class SummonService : AccessibilityService() {
 
@@ -22,22 +22,8 @@ class SummonService : AccessibilityService() {
         Log.d(TAG, "VOLUME_UP from device='$deviceName' action=${event.action}")
         val isDji = deviceName.contains("DJI", ignoreCase = true)
         if (!isDji) return false // phone volume rocker → let the system handle volume normally
-        if (event.action == KeyEvent.ACTION_DOWN) handlePress()
+        if (event.action == KeyEvent.ACTION_DOWN) Summon.fire(this)
         return true // consume the DJI press so volume doesn't change
-    }
-
-    private fun handlePress() {
-        Summon.debounced {
-            val toggle = Summon.activityTrigger
-            if (Summon.activityResumed && toggle != null) {
-                toggle()
-            } else {
-                val i = Intent(this, MainActivity::class.java)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                    .putExtra(MainActivity.EXTRA_TRIGGER, true)
-                startActivity(i)
-            }
-        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}

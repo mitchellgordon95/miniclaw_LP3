@@ -3,8 +3,15 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- Lets the accessibility service bring the app to the foreground from the background. -->
+    <!-- Lets the accessibility service / wake service bring the app to the foreground (and over
+         the lockscreen) from the background. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Earbud-button wake: a mediaPlayback foreground service hosting a MediaSession. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- So we can launch the LightOS launcher for the "Return to home" button. -->
     <queries>
@@ -23,6 +30,7 @@
             android:launchMode="singleTask"
             android:stateNotNeeded="true"
             android:excludeFromRecents="true"
+            android:screenOrientation="portrait"
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout">
 
             <intent-filter>
@@ -52,5 +60,21 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/summon_accessibility_config" />
         </service>
+
+        <!-- Hosts the MediaSession that catches the Bluetooth earbud button while the phone is
+             locked/screen-off (the case the DJI volume-up button can't reach). -->
+        <service
+            android:name=".WakeService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!-- Restarts WakeService after a reboot. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

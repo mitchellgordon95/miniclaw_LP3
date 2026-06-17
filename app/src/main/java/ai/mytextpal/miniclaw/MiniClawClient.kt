@@ -1,6 +1,7 @@
 package ai.mytextpal.miniclaw
 
 import android.util.Base64
+import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -78,10 +79,17 @@ class MiniClawClient(
         }
     }
 
-    /** Send a user message to the agent. Returns false if the socket isn't open. */
-    fun sendText(content: String): Boolean {
+    /**
+     * Send a user message to the agent. Voice turns request low reasoning effort for speed;
+     * the server bumps to high when the user asks it to ("think hard about…"). Returns false
+     * if the socket isn't open.
+     */
+    fun sendText(content: String, effort: String = "low"): Boolean {
         val w = ws ?: return false
-        val msg = JSONObject().put("type", "message").put("content", content)
+        val msg = JSONObject()
+            .put("type", "message")
+            .put("content", content)
+            .put("effort", effort)
         return w.send(msg.toString())
     }
 
@@ -105,11 +113,16 @@ class MiniClawClient(
                 .post(body)
                 .build()
             apiHttp.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
+                if (!resp.isSuccessful) {
+                    // Don't let an auth/server failure masquerade as "couldn't hear that".
+                    Log.w(TAG, "transcribe HTTP ${resp.code}: ${resp.body?.string()?.take(200)}")
+                    return null
+                }
                 val json = JSONObject(resp.body?.string() ?: return null)
                 if (json.optBoolean("ok")) json.optString("text").ifBlank { null } else null
             }
         } catch (e: Exception) {
+            Log.w(TAG, "transcribe failed", e)
             null
         }
     }
@@ -128,10 +141,14 @@ class MiniClawClient(
                 .post(body)
                 .build()
             apiHttp.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "tts HTTP ${resp.code}")
+                    return null
+                }
                 resp.body?.bytes()
             }
         } catch (e: Exception) {
+            Log.w(TAG, "tts failed", e)
             null
         }
     }
@@ -139,5 +156,9 @@ class MiniClawClient(
     fun close() {
         ws?.close(1000, "bye")
         ws = null
+    }
+
+    companion object {
+        private const val TAG = "MiniClaw"
     }
 }
