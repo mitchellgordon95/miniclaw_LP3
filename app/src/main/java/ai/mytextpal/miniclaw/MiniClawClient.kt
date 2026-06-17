@@ -47,7 +47,10 @@ class MiniClawClient(
 
     fun connect() {
         if (ws != null) return
-        val req = Request.Builder().url("$wsUrl?token=$token").build()
+        // channel=phone marks this as the Light Phone voice channel: the server routes only this
+        // client's own replies back to it (so web-UI chats don't get spoken here) and tells the
+        // agent it's a voice surface so it answers concisely.
+        val req = Request.Builder().url("$wsUrl?token=$token&channel=phone").build()
         ws = wsHttp.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 listener.onStatus("connected")
