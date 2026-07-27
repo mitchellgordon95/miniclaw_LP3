@@ -21,3 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Voice"
 include(":app")
+include(":audiobook")
