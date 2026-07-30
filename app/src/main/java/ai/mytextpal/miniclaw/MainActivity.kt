@@ -52,8 +52,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import android.speech.RecognizerIntent
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -100,7 +100,9 @@ class MainActivity : ComponentActivity(), MiniClawListener {
     // True while VoiceRecorder is bringing up the Bluetooth mic link (~1s); taps are ignored
     // during this window so a stray press can't stop a recorder that hasn't started yet.
     private var starting = false
-    private var silenceJob: Job? = null
+
+    // Whether we currently own the earbud tap routing (see syncSessionClaim).
+    private var sessionClaimed = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -149,10 +151,10 @@ class MainActivity : ComponentActivity(), MiniClawListener {
             scope = lifecycleScope,
             synth = { text -> client.synthesize(text) },
             androidTts = tts!!,
-            onActiveChange = { active -> runOnUiThread { speaking = active } },
+            onActiveChange = { active -> runOnUiThread { speaking = active; syncSessionClaim() } },
         )
 
-        pendingTrigger = intent?.getBooleanExtra(EXTRA_TRIGGER, false) == true
+        pendingTrigger = isTriggerIntent(intent)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -185,8 +187,19 @@ class MainActivity : ComponentActivity(), MiniClawListener {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.getBooleanExtra(EXTRA_TRIGGER, false)) pendingTrigger = true
+        if (isTriggerIntent(intent)) pendingTrigger = true
     }
+
+    /**
+     * Launches that should start listening immediately: our own trigger extra (WakeService), or
+     * the system's voice-assistant intents — which is how the earbuds' 5-tap gesture arrives.
+     */
+    private fun isTriggerIntent(intent: Intent?): Boolean =
+        intent != null && (
+            intent.getBooleanExtra(EXTRA_TRIGGER, false) ||
+                intent.action == Intent.ACTION_VOICE_COMMAND ||
+                intent.action == RecognizerIntent.ACTION_VOICE_SEARCH_HANDS_FREE
+            )
 
     override fun onResume() {
         super.onResume()
@@ -237,13 +250,13 @@ class MainActivity : ComponentActivity(), MiniClawListener {
         when {
             starting -> recording = false // flag the in-flight start to bail out
             recorder.isRecording -> {
-                silenceJob?.cancel()
                 recorder.cancel()
                 recording = false
                 status = ""
             }
             busy || ttsPlayer.isSpeaking -> abortReply()
         }
+        syncSessionClaim()
     }
 
     /** Stop an in-flight generation and any speech, returning to idle. */
@@ -254,6 +267,21 @@ class MainActivity : ComponentActivity(), MiniClawListener {
         busy = false
         speaking = false
         status = ""
+        syncSessionClaim()
+    }
+
+    /**
+     * Own the earbud tap routing only while a voice session is live (recording, thinking, or
+     * speaking) — so mid-conversation 1 tap = advance and 2–3 taps = cancel, but the rest of the
+     * time taps keep their normal media meaning (e.g. controlling the audiobook). Idle summon is
+     * the 5-tap voice-assistant gesture instead.
+     */
+    private fun syncSessionClaim() {
+        val active = recording || busy || speaking
+        if (active != sessionClaimed) {
+            sessionClaimed = active
+            WakeService.setSessionActive(this, active)
+        }
     }
 
     private fun beginRecording() {
@@ -269,54 +297,23 @@ class MainActivity : ComponentActivity(), MiniClawListener {
         speaking = false
         recording = true
         status = "mic…"
+        syncSessionClaim()
         lifecycleScope.launch {
             val ok = recorder.start() // suspends ~1s while the earbud SCO link comes up
             starting = false
             if (!recording) { // aborted while the link was coming up
                 if (ok) recorder.cancel()
+                syncSessionClaim()
                 return@launch
             }
             if (ok) {
                 status = "listening"
                 playReady()
-                watchSilence()
             } else {
                 recording = false
                 status = "mic error"
                 playError()
-            }
-        }
-    }
-
-    /**
-     * Hands-free endpointing: once speech has been heard, ~2.5s of trailing silence confirms and
-     * sends. This is the pocket-safety net for the Raycons — while their mic's SCO link is up,
-     * a tap may be treated as a call control by the bud firmware and never reach us, so a
-     * recording must be able to complete without any button at all. A long stretch with no
-     * speech cancels instead of sending.
-     */
-    private fun watchSilence() {
-        silenceJob?.cancel()
-        silenceJob = lifecycleScope.launch {
-            var heardSpeech = false
-            var quietMs = 0L
-            var totalMs = 0L
-            recorder.maxAmplitude() // discard amplitude accumulated before "listening"
-            while (recording && recorder.isRecording) {
-                delay(POLL_MS)
-                totalMs += POLL_MS
-                val amp = recorder.maxAmplitude()
-                if (amp >= SPEECH_AMP) {
-                    heardSpeech = true
-                    quietMs = 0
-                } else if (amp < SILENCE_AMP) {
-                    quietMs += POLL_MS
-                }
-                when {
-                    heardSpeech && quietMs >= ENDPOINT_SILENCE_MS -> { stopAndSend(); break }
-                    !heardSpeech && totalMs >= NO_SPEECH_TIMEOUT_MS -> { onAbort(); playError(); break }
-                    totalMs >= MAX_UTTERANCE_MS -> { stopAndSend(); break }
-                }
+                syncSessionClaim()
             }
         }
     }
@@ -342,7 +339,6 @@ class MainActivity : ComponentActivity(), MiniClawListener {
     }
 
     private fun stopAndSend() {
-        silenceJob?.cancel()
         recording = false
         busy = true
         status = "transcribing…"
@@ -351,6 +347,7 @@ class MainActivity : ComponentActivity(), MiniClawListener {
         if (file == null) {
             status = "mic error"
             busy = false
+            syncSessionClaim()
             return
         }
         lifecycleScope.launch {
@@ -359,6 +356,7 @@ class MainActivity : ComponentActivity(), MiniClawListener {
             if (text.isNullOrBlank()) {
                 status = "couldn't hear that"
                 busy = false
+                syncSessionClaim()
                 return@launch
             }
             pendingTranscript = text
@@ -371,6 +369,7 @@ class MainActivity : ComponentActivity(), MiniClawListener {
                 if (!client.sendText(text)) {
                     status = "not connected"
                     busy = false
+                    syncSessionClaim()
                 }
             }
         }
@@ -440,18 +439,11 @@ class MainActivity : ComponentActivity(), MiniClawListener {
         if (content.isNotBlank()) history.add(Exchange(pendingTranscript, content))
         if (status != "speaking…") status = ""
         pendingTranscript = ""
+        syncSessionClaim()
     }
 
     companion object {
         const val EXTRA_TRIGGER = "trigger"
-
-        // Silence-endpointing knobs (prototype constants; MediaRecorder amplitude is 0–32767).
-        private const val POLL_MS = 150L
-        private const val SPEECH_AMP = 2500
-        private const val SILENCE_AMP = 1200
-        private const val ENDPOINT_SILENCE_MS = 2_500L
-        private const val NO_SPEECH_TIMEOUT_MS = 12_000L
-        private const val MAX_UTTERANCE_MS = 60_000L
     }
 }
 

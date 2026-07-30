@@ -8,8 +8,9 @@ import android.content.Intent
  * earbud taps, screen on or off) and the Activity (which runs the record/transcribe/reply
  * pipeline).
  *
- * Two actions map to the earbud gestures (Raycon Essential Open):
- *  - [fire] = single tap ("advance the loop": start → confirm/send → stop-and-relisten).
+ * Two actions map to the in-session earbud gestures (Raycon Essential Open); idle summon is the
+ * separate 5-tap voice-assistant intent, delivered straight to MainActivity:
+ *  - [fire] = single tap ("advance the loop": confirm/send → stop-and-relisten).
  *  - [cancel] = double/triple tap ("back out": discard a recording, or stop the AI without
  *    re-listening).
  */

@@ -21,8 +21,8 @@ import java.io.File
  * gestures keep routing to WakeService's MediaSession.
  *
  * Caveat while SCO is up: some earbud firmware treats a tap as "answer/end call" instead of
- * play/pause, so the tap may not reach us mid-recording. MainActivity compensates with a
- * silence-based auto-stop, so a recording always completes hands-free.
+ * play/pause, so a tap might not reach us mid-recording. If that turns out to be true of the
+ * Raycons, the on-screen ✓/✗ buttons still work.
  */
 class VoiceRecorder(private val context: Context) {
 
@@ -121,12 +121,6 @@ class VoiceRecorder(private val context: Context) {
         }
         usingBluetoothMic = false
     }
-
-    /**
-     * Max input amplitude since the last call (0–32767); MediaRecorder resets it on read, which
-     * is exactly the polling semantics the silence auto-stop wants. 0 when not recording.
-     */
-    fun maxAmplitude(): Int = try { recorder?.maxAmplitude ?: 0 } catch (_: Exception) { 0 }
 
     /** Stops recording and returns the recorded file, or null on failure. */
     fun stop(): File? {

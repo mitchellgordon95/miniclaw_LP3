@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
@@ -26,21 +27,21 @@ import android.support.v4.media.session.PlaybackStateCompat
 import kotlin.concurrent.thread
 
 /**
- * Always-on foreground service whose only job is to catch a Bluetooth earbud's media button
- * (a single tap on the Raycon Essential Open buds → AVRCP PLAY/PAUSE) while the phone is locked
- * and the screen is off — so a tap works from a pocket with no other hardware.
+ * Foreground service hosting the MediaSession that owns the earbud taps DURING a voice session
+ * (MainActivity toggles it via [setSessionActive]): 1 tap = advance the loop, 2–3 taps = cancel.
+ * Outside a session the session is inactive, so taps keep their normal media meaning (play the
+ * audiobook, skip, …). Idle summon is the buds' 5-tap voice-assistant gesture, which arrives as
+ * a voice-assistant intent on MainActivity — not through here.
  *
- * How it reaches us when locked: media transport buttons are routed by the framework to the
- * "active media session of the app that most recently played audio locally", regardless of
- * screen/keyguard state. So we (1) hold an active MediaSession, and (2) claim that
- * most-recently-played slot with a brief *silent* AudioTrack blip — on start and whenever a
- * Bluetooth output device connects. We deliberately do NOT loop silence continuously: the
- * "most recent player" status is sticky until some other app plays, so an occasional blip keeps
- * us the button target while letting the phone sleep normally (battery-minimal).
+ * How taps reach us mid-session even locked/screen-off: media transport buttons are routed by
+ * the framework to the "active media session of the app that most recently played audio
+ * locally", regardless of screen/keyguard state. So on session start we (1) activate our
+ * MediaSession, and (2) claim that most-recently-played slot with a brief *silent* AudioTrack
+ * blip.
  *
- * On a press we don't run audio here — we just wake the screen and launch MainActivity (which is
- * flagged show-when-locked); the existing record→transcribe→reply loop runs there, so the
- * Activity is "in use" and mic capture is unrestricted.
+ * [IDLE_TAP_SUMMON] is the pre-5-tap behavior — the session stays active and claims routing
+ * permanently, so a single tap summons from idle. Flip it back on if the Raycons' 5-tap gesture
+ * turns out not to reach Android as a voice-assistant intent.
  */
 class WakeService : Service() {
 
@@ -54,11 +55,23 @@ class WakeService : Service() {
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         startForegroundNotification()
         setupSession()
-        claimRouting() // become the most-recent player now
-        registerDeviceCallback() // …and again whenever earbuds (re)connect
+        if (IDLE_TAP_SUMMON) {
+            session.isActive = true
+            claimRouting() // become the most-recent player now
+            registerDeviceCallback() // …and again whenever earbuds (re)connect
+        }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_SESSION_ACTIVE -> {
+                session.isActive = true
+                claimRouting()
+            }
+            ACTION_SESSION_IDLE -> if (!IDLE_TAP_SUMMON) session.isActive = false
+        }
+        return START_STICKY
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -120,7 +133,7 @@ class WakeService : Service() {
                     .putString(MediaMetadataCompat.METADATA_KEY_TITLE, "Voice")
                     .build(),
             )
-            isActive = true
+            // isActive is toggled per voice session (or permanently under IDLE_TAP_SUMMON).
         }
     }
 
@@ -196,7 +209,7 @@ class WakeService : Service() {
         )
         val notif: Notification = NotificationCompat.Builder(this, CHANNEL)
             .setContentTitle("Voice ready")
-            .setContentText("Tap your earbud to talk")
+            .setContentText("Tap an earbud 5 times to talk")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(open)
             .setOngoing(true)
@@ -214,6 +227,20 @@ class WakeService : Service() {
         private const val TAG = "Wake"
         private const val CHANNEL = "wake"
         private const val NOTIF_ID = 42
+
+        // Fallback: single tap summons from idle (the session hijacks taps permanently).
+        private const val IDLE_TAP_SUMMON = false
+
+        private const val ACTION_SESSION_ACTIVE = "ai.mytextpal.miniclaw.SESSION_ACTIVE"
+        private const val ACTION_SESSION_IDLE = "ai.mytextpal.miniclaw.SESSION_IDLE"
+
+        /** MainActivity calls this as a voice session starts/ends to grab/release the taps. */
+        fun setSessionActive(context: Context, active: Boolean) {
+            context.startService(
+                Intent(context, WakeService::class.java)
+                    .setAction(if (active) ACTION_SESSION_ACTIVE else ACTION_SESSION_IDLE),
+            )
+        }
 
         private val BLUETOOTH_OUT_TYPES = setOf(
             AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
