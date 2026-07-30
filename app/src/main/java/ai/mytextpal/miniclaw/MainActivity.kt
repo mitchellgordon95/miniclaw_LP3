@@ -271,13 +271,13 @@ class MainActivity : ComponentActivity(), MiniClawListener {
     }
 
     /**
-     * Own the earbud tap routing only while a voice session is live (recording, thinking, or
-     * speaking) — so mid-conversation 1 tap = advance and 2–3 taps = cancel, but the rest of the
-     * time taps keep their normal media meaning (e.g. controlling the audiobook). Idle summon is
-     * the 5-tap voice-assistant gesture instead.
+     * Own the earbud tap routing ONLY while actually recording: a single tap then ends voice
+     * input (confirm & send) and 2–3 taps discard it. Any other time — idle, thinking, even
+     * while the reply is speaking — taps are not caught at all and fall through to the podcast
+     * player. Summoning (and interrupting a reply) is the 5-tap voice-assistant gesture.
      */
     private fun syncSessionClaim() {
-        val active = recording || busy || speaking
+        val active = recording
         if (active != sessionClaimed) {
             sessionClaimed = active
             WakeService.setSessionActive(this, active)

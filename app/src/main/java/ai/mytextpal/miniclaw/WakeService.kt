@@ -27,15 +27,16 @@ import android.support.v4.media.session.PlaybackStateCompat
 import kotlin.concurrent.thread
 
 /**
- * Foreground service hosting the MediaSession that owns the earbud taps DURING a voice session
- * (MainActivity toggles it via [setSessionActive]): 1 tap = advance the loop, 2–3 taps = cancel.
- * Outside a session the session is inactive, so taps keep their normal media meaning (play the
- * audiobook, skip, …). Idle summon is the buds' 5-tap voice-assistant gesture, which arrives as
- * a voice-assistant intent on MainActivity — not through here.
+ * Foreground service hosting the MediaSession that owns the earbud taps ONLY while voice input
+ * is being recorded (MainActivity toggles it via [setSessionActive]): 1 tap = confirm & send,
+ * 2–3 taps = discard. The rest of the time — including while the reply is speaking — the
+ * session is inactive so taps keep their normal media meaning (podcast/audiobook control).
+ * Summoning, and interrupting a reply, is the buds' 5-tap voice-assistant gesture, which
+ * arrives as a voice-assistant intent on MainActivity — not through here.
  *
- * How taps reach us mid-session even locked/screen-off: media transport buttons are routed by
+ * How taps reach us mid-recording even locked/screen-off: media transport buttons are routed by
  * the framework to the "active media session of the app that most recently played audio
- * locally", regardless of screen/keyguard state. So on session start we (1) activate our
+ * locally", regardless of screen/keyguard state. So on recording start we (1) activate our
  * MediaSession, and (2) claim that most-recently-played slot with a brief *silent* AudioTrack
  * blip.
  *
