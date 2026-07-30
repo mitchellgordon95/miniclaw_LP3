@@ -4,13 +4,14 @@ import android.content.Context
 import android.content.Intent
 
 /**
- * Tiny shared bridge between the trigger sources (the AccessibilityService that hears the DJI
- * button screen-on, and the MediaSession WakeService that hears the earbud button while
- * locked/screen-off) and the Activity (which runs the record/transcribe/reply pipeline).
+ * Tiny shared bridge between the trigger source (the MediaSession WakeService that hears the
+ * earbud taps, screen on or off) and the Activity (which runs the record/transcribe/reply
+ * pipeline).
  *
- * Two actions map to the two earbud gestures:
+ * Two actions map to the earbud gestures (Raycon Essential Open):
  *  - [fire] = single tap ("advance the loop": start → confirm/send → stop-and-relisten).
- *  - [cancel] = double tap ("back out": discard a recording, or stop the AI without re-listening).
+ *  - [cancel] = double/triple tap ("back out": discard a recording, or stop the AI without
+ *    re-listening).
  */
 object Summon {
     /** True while MainActivity is in the foreground. */

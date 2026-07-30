@@ -11,7 +11,6 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.util.Log
-import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
@@ -54,6 +53,8 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -66,7 +67,7 @@ private enum class UiMode { IDLE, RECORDING, RESPONDING }
 /**
  * MiniClaw launcher (v1).
  *
- * DJI button / on-screen mic → record → transcribe → send over WebSocket → Wright's reply
+ * Earbud tap / on-screen mic → record → transcribe → send over WebSocket → Wright's reply
  * streams back token-by-token and is spoken sentence-by-sentence (cloud TTS via /api/tts, with
  * the on-device engine as fallback). Speaking starts as soon as the first sentence arrives.
  */
@@ -90,12 +91,16 @@ class MainActivity : ComponentActivity(), MiniClawListener {
     private var busy by mutableStateOf(false)
     private var status by mutableStateOf("")
     private var showHistory by mutableStateOf(false)
-    private var summonEnabled by mutableStateOf(false)
     private var speaking by mutableStateOf(false)
     private val history = mutableStateListOf<Exchange>()
 
     private var pendingTranscript = ""
     private var pendingTrigger = false
+
+    // True while VoiceRecorder is bringing up the Bluetooth mic link (~1s); taps are ignored
+    // during this window so a stray press can't stop a recorder that hasn't started yet.
+    private var starting = false
+    private var silenceJob: Job? = null
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -167,7 +172,6 @@ class MainActivity : ComponentActivity(), MiniClawListener {
                             else -> UiMode.IDLE
                         },
                         status = status,
-                        summonEnabled = summonEnabled,
                         onPrimary = ::onPrimary,
                         onAbort = ::onAbort,
                         onHistory = { showHistory = true },
@@ -189,7 +193,6 @@ class MainActivity : ComponentActivity(), MiniClawListener {
         Summon.activityResumed = true
         Summon.activityPrimary = { onPrimary() }
         Summon.activityAbort = { onAbort() }
-        summonEnabled = isSummonServiceEnabled()
         if (pendingTrigger) {
             pendingTrigger = false
             onPrimary()
@@ -212,14 +215,6 @@ class MainActivity : ComponentActivity(), MiniClawListener {
         super.onDestroy()
     }
 
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-            if (event.action == KeyEvent.ACTION_DOWN) onPrimary()
-            return true
-        }
-        return super.dispatchKeyEvent(event)
-    }
-
     /**
      * Single tap / "advance the loop":
      *   idle → start recording; recording → confirm & send; responding → stop the reply early
@@ -227,6 +222,7 @@ class MainActivity : ComponentActivity(), MiniClawListener {
      */
     private fun onPrimary() {
         when {
+            starting -> {} // mic link still coming up — ignore
             recorder.isRecording -> stopAndSend()
             busy || ttsPlayer.isSpeaking -> { abortReply(); beginRecording() }
             else -> beginRecording()
@@ -234,12 +230,14 @@ class MainActivity : ComponentActivity(), MiniClawListener {
     }
 
     /**
-     * Double tap / "back out":
+     * Double or triple tap / "back out":
      *   recording → discard it; responding → stop the reply and stay idle; idle → nothing.
      */
     private fun onAbort() {
         when {
+            starting -> recording = false // flag the in-flight start to bail out
             recorder.isRecording -> {
+                silenceJob?.cancel()
                 recorder.cancel()
                 recording = false
                 status = ""
@@ -264,21 +262,75 @@ class MainActivity : ComponentActivity(), MiniClawListener {
     }
 
     private fun startRecording() {
-        if (!recorder.isUsbMicConnected()) {
-            status = "Connect the DJI mic"
-            playError()
-            return
-        }
+        if (starting || recorder.isRecording) return
+        starting = true
         ttsPlayer.stop()
         ttsBuffer.setLength(0)
         speaking = false
-        if (recorder.start()) {
-            recording = true
-            status = "listening"
-        } else {
-            status = "mic error"
-            playError()
+        recording = true
+        status = "mic…"
+        lifecycleScope.launch {
+            val ok = recorder.start() // suspends ~1s while the earbud SCO link comes up
+            starting = false
+            if (!recording) { // aborted while the link was coming up
+                if (ok) recorder.cancel()
+                return@launch
+            }
+            if (ok) {
+                status = "listening"
+                playReady()
+                watchSilence()
+            } else {
+                recording = false
+                status = "mic error"
+                playError()
+            }
         }
+    }
+
+    /**
+     * Hands-free endpointing: once speech has been heard, ~2.5s of trailing silence confirms and
+     * sends. This is the pocket-safety net for the Raycons — while their mic's SCO link is up,
+     * a tap may be treated as a call control by the bud firmware and never reach us, so a
+     * recording must be able to complete without any button at all. A long stretch with no
+     * speech cancels instead of sending.
+     */
+    private fun watchSilence() {
+        silenceJob?.cancel()
+        silenceJob = lifecycleScope.launch {
+            var heardSpeech = false
+            var quietMs = 0L
+            var totalMs = 0L
+            recorder.maxAmplitude() // discard amplitude accumulated before "listening"
+            while (recording && recorder.isRecording) {
+                delay(POLL_MS)
+                totalMs += POLL_MS
+                val amp = recorder.maxAmplitude()
+                if (amp >= SPEECH_AMP) {
+                    heardSpeech = true
+                    quietMs = 0
+                } else if (amp < SILENCE_AMP) {
+                    quietMs += POLL_MS
+                }
+                when {
+                    heardSpeech && quietMs >= ENDPOINT_SILENCE_MS -> { stopAndSend(); break }
+                    !heardSpeech && totalMs >= NO_SPEECH_TIMEOUT_MS -> { onAbort(); playError(); break }
+                    totalMs >= MAX_UTTERANCE_MS -> { stopAndSend(); break }
+                }
+            }
+        }
+    }
+
+    /** Short "listening" beep, routed so it's audible in the earbuds while their mic is live. */
+    private fun playReady() {
+        try {
+            val stream =
+                if (recorder.usingBluetoothMic) AudioManager.STREAM_VOICE_CALL
+                else AudioManager.STREAM_MUSIC
+            val tg = ToneGenerator(stream, 80)
+            tg.startTone(ToneGenerator.TONE_PROP_BEEP)
+            lifecycleScope.launch { delay(300); tg.release() }
+        } catch (_: Exception) {}
     }
 
     /** Short error tone (routes through STREAM_MUSIC → the earbuds). */
@@ -290,6 +342,7 @@ class MainActivity : ComponentActivity(), MiniClawListener {
     }
 
     private fun stopAndSend() {
+        silenceJob?.cancel()
         recording = false
         busy = true
         status = "transcribing…"
@@ -348,14 +401,6 @@ class MainActivity : ComponentActivity(), MiniClawListener {
         ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
 
-    private fun isSummonServiceEnabled(): Boolean {
-        val enabled = Settings.Secure.getString(
-            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: return false
-        return enabled.contains("$packageName/.SummonService") ||
-            enabled.contains("$packageName/$packageName.SummonService")
-    }
-
     private fun returnToLightOS() {
         val i = packageManager.getLaunchIntentForPackage("com.lightos")
         if (i != null) startActivity(i) else startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
@@ -399,6 +444,14 @@ class MainActivity : ComponentActivity(), MiniClawListener {
 
     companion object {
         const val EXTRA_TRIGGER = "trigger"
+
+        // Silence-endpointing knobs (prototype constants; MediaRecorder amplitude is 0–32767).
+        private const val POLL_MS = 150L
+        private const val SPEECH_AMP = 2500
+        private const val SILENCE_AMP = 1200
+        private const val ENDPOINT_SILENCE_MS = 2_500L
+        private const val NO_SPEECH_TIMEOUT_MS = 12_000L
+        private const val MAX_UTTERANCE_MS = 60_000L
     }
 }
 
@@ -406,7 +459,6 @@ class MainActivity : ComponentActivity(), MiniClawListener {
 private fun HomeScreen(
     mode: UiMode,
     status: String,
-    summonEnabled: Boolean,
     onPrimary: () -> Unit,
     onAbort: () -> Unit,
     onHistory: () -> Unit,
@@ -466,14 +518,6 @@ private fun HomeScreen(
 
             Spacer(Modifier.weight(1f))
 
-            if (!summonEnabled) {
-                Text(
-                    "Summon off — enable “MiniClaw mic button” in Accessibility",
-                    color = Color(0xFFB0884A),
-                    fontSize = 11.sp,
-                )
-                Spacer(Modifier.height(6.dp))
-            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,

@@ -3,8 +3,8 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- Lets the accessibility service / wake service bring the app to the foreground (and over
-         the lockscreen) from the background. -->
+    <!-- Lets the wake service bring the app to the foreground (and over the lockscreen) from
+         the background. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <!-- Earbud-button wake: a mediaPlayback foreground service hosting a MediaSession. -->
@@ -45,24 +45,7 @@
             </intent-filter>
         </activity>
 
-        <!-- Listens for the DJI mic button (a HID VOLUME_UP) system-wide, screen on. It filters
-             by input device so only the DJI mic triggers a summon; the phone's own volume rocker
-             is left alone. No foreground-service notification required. -->
-        <service
-            android:name=".SummonService"
-            android:exported="false"
-            android:label="MiniClaw mic button"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/summon_accessibility_config" />
-        </service>
-
-        <!-- Hosts the MediaSession that catches the Bluetooth earbud button while the phone is
-             locked/screen-off (the case the DJI volume-up button can't reach). -->
+        <!-- Hosts the MediaSession that catches the Bluetooth earbud taps, screen on or off. -->
         <service
             android:name=".WakeService"
             android:exported="false"

@@ -27,8 +27,8 @@ import kotlin.concurrent.thread
 
 /**
  * Always-on foreground service whose only job is to catch a Bluetooth earbud's media button
- * (e.g. a single tap on Pixel Buds → AVRCP PLAY/PAUSE) while the phone is locked and the screen
- * is off — the one input that the DJI volume-up button can't deliver from a pocket.
+ * (a single tap on the Raycon Essential Open buds → AVRCP PLAY/PAUSE) while the phone is locked
+ * and the screen is off — so a tap works from a pocket with no other hardware.
  *
  * How it reaches us when locked: media transport buttons are routed by the framework to the
  * "active media session of the app that most recently played audio locally", regardless of
@@ -82,9 +82,12 @@ class WakeService : Service() {
                                 Log.d(TAG, "media button ${ke.keyCode} → fire")
                                 Summon.fire(this@WakeService); return true
                             }
-                            // Double tap on the earbuds = "next track" → our abort/cancel gesture.
-                            ke.keyCode == KeyEvent.KEYCODE_MEDIA_NEXT -> {
-                                Log.d(TAG, "media button NEXT → cancel")
+                            // Raycon gestures: double tap = "next track", triple tap =
+                            // "previous track" — both are our abort/cancel gesture (a miscounted
+                            // extra tap should still read as "back out").
+                            ke.keyCode == KeyEvent.KEYCODE_MEDIA_NEXT ||
+                                ke.keyCode == KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                                Log.d(TAG, "media button ${ke.keyCode} → cancel")
                                 Summon.cancel(this@WakeService); return true
                             }
                         }
@@ -96,6 +99,7 @@ class WakeService : Service() {
                 override fun onPlay() = Summon.fire(this@WakeService)
                 override fun onPause() = Summon.fire(this@WakeService)
                 override fun onSkipToNext() = Summon.cancel(this@WakeService)
+                override fun onSkipToPrevious() = Summon.cancel(this@WakeService)
             })
 
             // Report PLAYING so we sort to the top of active sessions for button routing.
@@ -105,7 +109,8 @@ class WakeService : Service() {
                         PlaybackStateCompat.ACTION_PLAY or
                             PlaybackStateCompat.ACTION_PAUSE or
                             PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                            PlaybackStateCompat.ACTION_SKIP_TO_NEXT,
+                            PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS,
                     )
                     .setState(PlaybackStateCompat.STATE_PLAYING, 0L, 1f)
                     .build(),
