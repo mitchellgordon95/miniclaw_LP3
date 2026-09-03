@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Voice</string>
+    <string name="summon_service_desc">Summons MiniClaw when the trigger hardware button is pressed twice.</string>
 </resources>
