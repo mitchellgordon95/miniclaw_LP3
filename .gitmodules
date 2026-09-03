@@ -1,0 +1,3 @@
+[submodule "books-tool/light-sdk"]
+	path = books-tool/light-sdk
+	url = https://github.com/lightphone/light-sdk.git

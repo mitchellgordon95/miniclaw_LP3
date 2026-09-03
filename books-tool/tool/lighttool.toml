@@ -1,0 +1,17 @@
+[tool]
+id = "ai.mytextpal.books"
+label = "Books"
+versionCode = 1
+versionName = "0.1.0"
+orientation = "portrait"
+permissions = [
+    # Reading /sdcard/Audiobooks. On the SDK's allowed list; LightOS asks the
+    # user the first time the tool needs it.
+    "android.permission.READ_MEDIA_AUDIO",
+]
+# Background playback: the plugin wires the SDK's LightAudioService and its
+# foreground-service permissions into the manifest.
+capabilities = ["detached-audio"]
+# Real LP3 hardware binds to the LightOS system app.
+# Use "com.thelightphone.sdk.emulator" for the LightOS emulator instead.
+serverPackage = "com.lightos"
