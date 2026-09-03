@@ -55,7 +55,14 @@ development key, which is fine for side-loading your own builds.
 
 ```
 adb install -r tool/build/outputs/apk/debug/tool-debug.apk
+adb shell pm grant ai.mytextpal.books android.permission.READ_MEDIA_AUDIO
 ```
+
+The second line is needed for now: production LightOS (v572, September 2026) only
+verifies tools signed by Light, and a dev-key build is rejected by its SDK service
+("unverified caller"). That blocks the in-LightOS permission prompt, so grant the
+permission over adb instead. Playback, background audio and earbud controls don't go
+through that service and work regardless.
 
 `lighttool.toml` binds the tool to real LightOS (`serverPackage = "com.lightos"`). For
 the LightOS emulator, switch it to `com.thelightphone.sdk.emulator`.
