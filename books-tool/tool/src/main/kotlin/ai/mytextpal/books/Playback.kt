@@ -87,10 +87,14 @@ object Playback {
     private val _fault = MutableStateFlow<String?>(null)
     val fault: StateFlow<String?> = _fault.asStateFlow()
 
+    /** True while a book's queue is being prepared and seeked; the UI shows "Opening…". */
+    private val _loading = MutableStateFlow(false)
+    val loading: StateFlow<Boolean> = _loading.asStateFlow()
+
     private var pausedAt = 0L
     private var idleJob: Job? = null
     private var sleepJob: Job? = null
-    private var loading = false
+    private val isLoading: Boolean get() = _loading.value
 
     /** Called by the first screen. Later calls just refresh the audio factory (new activity). */
     fun start(audio: LightAudio, store: PositionStore) {
@@ -124,7 +128,7 @@ object Playback {
     /** Start (or continue) [book] from where the listener left off. */
     fun open(book: Book) {
         scope.launch {
-            if (_book.value?.id == book.id && playerFlow.value != null && !loading) {
+            if (_book.value?.id == book.id && playerFlow.value != null && !isLoading) {
                 if (!isPlaying.value) resume()
                 return@launch
             }
@@ -207,8 +211,8 @@ object Playback {
 
     private suspend fun loadAndPlay(book: Book) {
         val store = store ?: return
-        val player = ensurePlayer() ?: return
-        loading = true
+        _loading.value = true
+        val player = ensurePlayer() ?: run { _loading.value = false; return }
         try {
             _book.value = book
             val start = startPoint(store.load(book.id), book.files.size, System.currentTimeMillis())
@@ -217,12 +221,14 @@ object Playback {
             player.setMediaQueue(book.toQueue(), start.fileIndex)
             if (start.posMs > 0L) {
                 // seekTo clamps to the resolved duration, so wait until the part is prepared.
-                withTimeoutOrNull(PREPARE_TIMEOUT_MS) { player.durationMs.first { it > 0L } }
+                val t0 = System.currentTimeMillis()
+                val known = withTimeoutOrNull(PREPARE_TIMEOUT_MS) { player.durationMs.first { it > 0L } }
+                Log.i(TAG, "Prepared wait: ${System.currentTimeMillis() - t0} ms, duration=$known, index=${player.currentMediaItemIndex.value}")
                 player.seekTo(start.posMs)
             }
             player.play()
         } finally {
-            loading = false
+            _loading.value = false
         }
     }
 
@@ -251,7 +257,7 @@ object Playback {
         val book = _book.value ?: return
         val index = partIndex.value
         // While a queue is being swapped in, the flows briefly describe the wrong book.
-        if (index < 0 || loading) return
+        if (index < 0 || isLoading) return
         val finished = isBookFinished(index, book.files.size, positionMs.value, durationMs.value) && !isPlaying.value
         store.save(
             book.id,

@@ -99,14 +99,11 @@ class PlayerScreen(sealedActivity: SealedLightActivity) :
         val fault by Playback.fault.collectAsState()
         val now by viewModel.now.collectAsState()
         val confirming by viewModel.confirmingRestart.collectAsState()
+        val loading by Playback.loading.collectAsState()
 
         val current = book
         val partCount = current?.files?.size ?: 0
-        val partLine = when {
-            current == null -> ""
-            partCount > 1 && part >= 0 -> "Part ${part + 1} of $partCount"
-            else -> current.files.firstOrNull()?.nameWithoutExtension.orEmpty()
-        }
+        val partLine = if (current != null && partCount > 1 && part >= 0) "Part ${part + 1} of $partCount" else ""
 
         LightTheme(colors = colors) {
             Column(
@@ -152,13 +149,13 @@ class PlayerScreen(sealedActivity: SealedLightActivity) :
                     )
                     Row(Modifier.fillMaxWidth()) {
                         LightText(
-                            text = formatDuration(position),
+                            text = if (loading) "Opening…" else formatDuration(position),
                             variant = LightTextVariant.Fine,
                             monospace = true,
                             modifier = Modifier.weight(1f),
                         )
                         LightText(
-                            text = if (duration > 0L) "-" + formatDuration(duration - position) else "--:--",
+                            text = if (duration > 0L && !loading) "-" + formatDuration(duration - position) else "--:--",
                             variant = LightTextVariant.Fine,
                             monospace = true,
                             align = TextAlign.End,
