@@ -56,6 +56,22 @@
             </intent-filter>
         </activity>
 
+        <!-- Hardware-button summon: an accessibility service with key filtering sees every
+             hardware key (screen on or locked) and fires on a double-press of the trigger key
+             (SummonService.TRIGGER_KEYCODE). Enabled via adb; see SummonService. -->
+        <service
+            android:name=".SummonService"
+            android:exported="false"
+            android:label="MiniClaw button summon"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/summon_accessibility_config" />
+        </service>
+
         <!-- Hosts the MediaSession that catches the Bluetooth earbud taps, screen on or off. -->
         <service
             android:name=".WakeService"
